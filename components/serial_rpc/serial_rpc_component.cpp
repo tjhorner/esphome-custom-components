@@ -97,7 +97,7 @@ void SerialRpcComponent::loop() {
 }
 
 void SerialRpcComponent::process_line_(const std::string &line) {
-  DynamicJsonDocument request_doc(2048);
+  JsonDocument request_doc;
   DeserializationError error = deserializeJson(request_doc, line);
   
   if (error) {
