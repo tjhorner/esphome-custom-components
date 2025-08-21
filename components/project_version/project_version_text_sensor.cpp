@@ -12,8 +12,11 @@ void ProjectVersionTextSensor::setup() {
   this->publish_state(ESPHOME_PROJECT_VERSION);
 }
 float ProjectVersionTextSensor::get_setup_priority() const { return setup_priority::DATA; }
-std::string ProjectVersionTextSensor::unique_id() { return get_mac_address() + "-project-version"; }
 void ProjectVersionTextSensor::dump_config() { LOG_TEXT_SENSOR("", "Project Version Text Sensor", this); }
+
+#if ESPHOME_VERSION_CODE < VERSION_CODE(2025, 8, 0)
+std::string ProjectVersionTextSensor::unique_id() { return get_mac_address() + "-project-version"; }
+#endif
 
 }  // namespace version
 }  // namespace esphome
