@@ -18,10 +18,10 @@ const char *const SerialRpcComponent::MAGIC_HEADER = "JRPC:";
 
 void SerialRpcComponent::setup() {
   global_serial_rpc_component = this;
-#ifdef USE_ARDUINO
+#ifdef USE_ESP32
+  this->uart_num_ = logger::global_logger->get_uart_num();
+#elif defined(USE_ARDUINO)
   this->hw_serial_ = logger::global_logger->get_hw_serial();
-#else
-  ESP_LOGE(TAG, "Serial RPC component is only supported with Arduino.");
 #endif
 
 #ifdef USE_WIFI
@@ -38,13 +38,15 @@ void SerialRpcComponent::dump_config() {
 }
 
 void SerialRpcComponent::loop() {
-#ifdef USE_ARDUINO
-  while (this->hw_serial_->available()) {
-    char c = this->hw_serial_->read();
+  auto byte = this->read_byte_();
+  while (byte.has_value()) {
+    char c = static_cast<char>(byte.value());
     
     if (!this->reading_line_) {
-      if (c == '\r' || c == '\n')
+      if (c == '\r' || c == '\n') {
+        byte = this->read_byte_();
         continue;
+      }
       
       this->reading_line_ = true;
       this->buffer_ = c;
@@ -71,6 +73,7 @@ void SerialRpcComponent::loop() {
         this->buffer_ += c;
       }
     }
+    byte = this->read_byte_();
   }
   
 #ifdef USE_WIFI
@@ -92,7 +95,6 @@ void SerialRpcComponent::loop() {
     
     ESP_LOGI(TAG, "Successfully connected to WiFi network '%s'", ssid.c_str());
   }
-#endif
 #endif
 }
 
@@ -454,12 +456,10 @@ void SerialRpcComponent::handle_wifi_settings_(JsonObject &request, JsonObject &
 
 void SerialRpcComponent::handle_get_wifi_networks_(JsonObject &request, JsonObject &response) {
 #ifdef USE_WIFI
-  wifi::global_wifi_component->start_scanning();
-  
   JsonObject result = response.createNestedObject("result");
   JsonArray networks = result.createNestedArray("networks");
   
-  auto scan_results = wifi::global_wifi_component->get_scan_result();
+  const auto &scan_results = wifi::global_wifi_component->get_scan_result();
   std::vector<std::string> added_ssids;
   
   for (auto &scan : scan_results) {
@@ -502,21 +502,94 @@ void SerialRpcComponent::on_wifi_connect_timeout_() {
 
 void SerialRpcComponent::send_response_(const std::string &json_response) {
   std::string full_response = MAGIC_HEADER + json_response + "\r\n";
-  
-#ifdef USE_ARDUINO
-  size_t total_bytes_written = 0;
+  this->write_data_(reinterpret_cast<const uint8_t *>(full_response.c_str()), full_response.length());
+}
 
-  while (total_bytes_written < full_response.length()) {
-    size_t bytes_written = this->hw_serial_->write(full_response.c_str() + total_bytes_written, full_response.length() - total_bytes_written);
-
-    if (bytes_written < 0) {
-      ESP_LOGE(TAG, "Failed to write to serial port");
-      return;
+optional<uint8_t> SerialRpcComponent::read_byte_() {
+  optional<uint8_t> byte;
+  uint8_t data = 0;
+#ifdef USE_ESP32
+  switch (logger::global_logger->get_uart()) {
+    case logger::UART_SELECTION_UART0:
+    case logger::UART_SELECTION_UART1:
+#if !defined(USE_ESP32_VARIANT_ESP32C3) && !defined(USE_ESP32_VARIANT_ESP32C6) && \
+    !defined(USE_ESP32_VARIANT_ESP32C61) && !defined(USE_ESP32_VARIANT_ESP32S2) && !defined(USE_ESP32_VARIANT_ESP32S3)
+    case logger::UART_SELECTION_UART2:
+#endif
+      if (this->uart_num_ >= 0) {
+        size_t available;
+        uart_get_buffered_data_len(this->uart_num_, &available);
+        if (available) {
+          uart_read_bytes(this->uart_num_, &data, 1, 0);
+          byte = data;
+        }
+      }
+      break;
+#if defined(USE_LOGGER_USB_CDC) && defined(CONFIG_ESP_CONSOLE_USB_CDC)
+    case logger::UART_SELECTION_USB_CDC:
+      if (esp_usb_console_available_for_read()) {
+        esp_usb_console_read_buf((char *) &data, 1);
+        byte = data;
+      }
+      break;
+#endif  // USE_LOGGER_USB_CDC
+#ifdef USE_LOGGER_USB_SERIAL_JTAG
+    case logger::UART_SELECTION_USB_SERIAL_JTAG: {
+      if (usb_serial_jtag_read_bytes((char *) &data, 1, 0)) {
+        byte = data;
+      }
+      break;
     }
-
-    total_bytes_written += bytes_written;
+#endif  // USE_LOGGER_USB_SERIAL_JTAG
+    default:
+      break;
+  }
+#elif defined(USE_ARDUINO)
+  if (this->hw_serial_->available()) {
+    this->hw_serial_->readBytes(&data, 1);
+    byte = data;
   }
 #endif
+  return byte;
+}
+
+void SerialRpcComponent::write_data_(const uint8_t *data, size_t size) {
+  static const size_t CHUNK_SIZE = 64;
+  size_t offset = 0;
+
+  while (offset < size) {
+    size_t chunk = std::min(CHUNK_SIZE, size - offset);
+    const uint8_t *chunk_data = data + offset;
+
+#ifdef USE_ESP32
+    switch (logger::global_logger->get_uart()) {
+      case logger::UART_SELECTION_UART0:
+      case logger::UART_SELECTION_UART1:
+#if !defined(USE_ESP32_VARIANT_ESP32C3) && !defined(USE_ESP32_VARIANT_ESP32C6) && \
+    !defined(USE_ESP32_VARIANT_ESP32C61) && !defined(USE_ESP32_VARIANT_ESP32S2) && !defined(USE_ESP32_VARIANT_ESP32S3)
+      case logger::UART_SELECTION_UART2:
+#endif
+        uart_write_bytes(this->uart_num_, chunk_data, chunk);
+        break;
+#if defined(USE_LOGGER_USB_CDC) && defined(CONFIG_ESP_CONSOLE_USB_CDC)
+      case logger::UART_SELECTION_USB_CDC:
+        esp_usb_console_write_buf((const char *) chunk_data, chunk);
+        break;
+#endif  // USE_LOGGER_USB_CDC
+#ifdef USE_LOGGER_USB_SERIAL_JTAG
+      case logger::UART_SELECTION_USB_SERIAL_JTAG:
+        usb_serial_jtag_write_bytes((const char *) chunk_data, chunk, 20 / portTICK_PERIOD_MS);
+        break;
+#endif  // USE_LOGGER_USB_SERIAL_JTAG
+      default:
+        return;
+    }
+#elif defined(USE_ARDUINO)
+    this->hw_serial_->write(chunk_data, chunk);
+#endif
+
+    offset += chunk;
+  }
 }
 
 SerialRpcComponent *global_serial_rpc_component = nullptr;
