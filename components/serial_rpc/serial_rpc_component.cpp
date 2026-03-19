@@ -118,13 +118,13 @@ void SerialRpcComponent::process_line_(const std::string &line) {
   
   JsonObject request = request_doc.as<JsonObject>();
   
-  if (!request.containsKey("jsonrpc") || !request.containsKey("method") || !request.containsKey("id")) {
+  if (request["jsonrpc"].isNull() || request["method"].isNull() || request["id"].isNull()) {
     ESP_LOGW(TAG, "Invalid JSON-RPC request: missing required fields");
     auto error_builder = [&request](JsonObject root) {
       root["jsonrpc"] = "2.0";
       root["error"]["code"] = -32600;
       root["error"]["message"] = "Invalid Request";
-      root["id"] = request.containsKey("id") ? request["id"] : nullptr;
+      root["id"] = request["id"];
     };
     
     std::string error_response = json::build_json(error_builder);
@@ -161,14 +161,14 @@ void SerialRpcComponent::process_line_(const std::string &line) {
 }
 
 void SerialRpcComponent::handle_device_info_(JsonObject &request, JsonObject &response) {
-  JsonObject result = response.createNestedObject("result");
+  JsonObject result = response["result"].to<JsonObject>();
   
   result["name"] = App.get_name();
   
-  std::string ip_address;
+  char ip_address[network::IP_ADDRESS_BUFFER_SIZE] = {};
   for (auto &ip : network::get_ip_addresses()) {
     if (ip.is_ip4()) {
-      ip_address = ip.str();
+      ip.str_to(ip_address);
       break;
     }
   }
@@ -176,7 +176,9 @@ void SerialRpcComponent::handle_device_info_(JsonObject &request, JsonObject &re
   
 #ifdef USE_WIFI
   if (wifi::global_wifi_component != nullptr && wifi::global_wifi_component->has_sta()) {
-    result["ssid"] = wifi::global_wifi_component->wifi_ssid();
+    char ssid_buf[wifi::SSID_BUFFER_SIZE];
+    wifi::global_wifi_component->wifi_ssid_to(ssid_buf);
+    result["ssid"] = ssid_buf;
   } else {
     result["ssid"] = "";
   }
@@ -193,9 +195,9 @@ void SerialRpcComponent::handle_device_info_(JsonObject &request, JsonObject &re
 }
 
 void SerialRpcComponent::handle_get_entity_(JsonObject &request, JsonObject &response) {
-  if (!request.containsKey("params") || !request["params"].is<JsonObject>() ||
-      !request["params"].as<JsonObject>().containsKey("id") || 
-      !request["params"].as<JsonObject>().containsKey("type")) {
+  if (!request["params"].is<JsonObject>() ||
+      request["params"]["id"].isNull() || 
+      request["params"]["type"].isNull()) {
     response["error"]["code"] = -32602;
     response["error"]["message"] = "Invalid params";
     return;
@@ -205,7 +207,7 @@ void SerialRpcComponent::handle_get_entity_(JsonObject &request, JsonObject &res
   std::string entity_id = params["id"].as<std::string>();
   uint8_t entity_type = params["type"].as<uint8_t>();
   
-  JsonObject result = response.createNestedObject("result");
+  JsonObject result = response["result"].to<JsonObject>();
   result["id"] = entity_id;
   result["type"] = entity_type;
   
@@ -215,7 +217,8 @@ void SerialRpcComponent::handle_get_entity_(JsonObject &request, JsonObject &res
 #ifdef USE_TEXT
     case ENTITY_TYPE_TEXT: {
       for (auto *obj : App.get_texts()) {
-        if (obj->get_object_id() == entity_id) {
+        char obj_id_buf[OBJECT_ID_MAX_LEN];
+        if (obj->get_object_id_to(obj_id_buf) == entity_id) {
           result["value"] = obj->state;
           result["mode"] = static_cast<int>(obj->traits.get_mode());
           result["min_length"] = obj->traits.get_min_length();
@@ -232,9 +235,10 @@ void SerialRpcComponent::handle_get_entity_(JsonObject &request, JsonObject &res
 #ifdef USE_SELECT
     case ENTITY_TYPE_SELECT: {
       for (auto *obj : App.get_selects()) {
-        if (obj->get_object_id() == entity_id) {
-          result["value"] = obj->state;
-          JsonArray options = result.createNestedArray("options");
+        char obj_id_buf[OBJECT_ID_MAX_LEN];
+        if (obj->get_object_id_to(obj_id_buf) == entity_id) {
+          result["value"] = std::string(obj->current_option());
+          JsonArray options = result["options"].to<JsonArray>();
           for (auto &option : obj->traits.get_options()) {
             options.add(option);
           }
@@ -249,7 +253,8 @@ void SerialRpcComponent::handle_get_entity_(JsonObject &request, JsonObject &res
 #ifdef USE_SWITCH
     case ENTITY_TYPE_SWITCH: {
       for (auto *obj : App.get_switches()) {
-        if (obj->get_object_id() == entity_id) {
+        char obj_id_buf[OBJECT_ID_MAX_LEN];
+        if (obj->get_object_id_to(obj_id_buf) == entity_id) {
           result["value"] = obj->state ? "ON" : "OFF";
           found = true;
           break;
@@ -273,10 +278,10 @@ void SerialRpcComponent::handle_get_entity_(JsonObject &request, JsonObject &res
 }
 
 void SerialRpcComponent::handle_set_entity_(JsonObject &request, JsonObject &response) {
-  if (!request.containsKey("params") || !request["params"].is<JsonObject>() ||
-      !request["params"].as<JsonObject>().containsKey("id") || 
-      !request["params"].as<JsonObject>().containsKey("type") ||
-      !request["params"].as<JsonObject>().containsKey("value")) {
+  if (!request["params"].is<JsonObject>() ||
+      request["params"]["id"].isNull() || 
+      request["params"]["type"].isNull() ||
+      request["params"]["value"].isNull()) {
     response["error"]["code"] = -32602;
     response["error"]["message"] = "Invalid params";
     return;
@@ -287,7 +292,7 @@ void SerialRpcComponent::handle_set_entity_(JsonObject &request, JsonObject &res
   uint8_t entity_type = params["type"].as<uint8_t>();
   std::string value = params["value"].as<std::string>();
   
-  JsonObject result = response.createNestedObject("result");
+  JsonObject result = response["result"].to<JsonObject>();
   result["id"] = entity_id;
   result["type"] = entity_type;
   
@@ -298,7 +303,8 @@ void SerialRpcComponent::handle_set_entity_(JsonObject &request, JsonObject &res
 #ifdef USE_TEXT
     case ENTITY_TYPE_TEXT: {
       for (auto *obj : App.get_texts()) {
-        if (obj->get_object_id() == entity_id) {
+        char obj_id_buf[OBJECT_ID_MAX_LEN];
+        if (obj->get_object_id_to(obj_id_buf) == entity_id) {
           found = true;
           auto call = obj->make_call();
           call.set_value(value);
@@ -314,7 +320,8 @@ void SerialRpcComponent::handle_set_entity_(JsonObject &request, JsonObject &res
 #ifdef USE_SELECT
     case ENTITY_TYPE_SELECT: {
       for (auto *obj : App.get_selects()) {
-        if (obj->get_object_id() == entity_id) {
+        char obj_id_buf[OBJECT_ID_MAX_LEN];
+        if (obj->get_object_id_to(obj_id_buf) == entity_id) {
           found = true;
           auto call = obj->make_call();
           call.set_option(value);
@@ -330,7 +337,8 @@ void SerialRpcComponent::handle_set_entity_(JsonObject &request, JsonObject &res
 #ifdef USE_SWITCH
     case ENTITY_TYPE_SWITCH: {
       for (auto *obj : App.get_switches()) {
-        if (obj->get_object_id() == entity_id) {
+        char obj_id_buf[OBJECT_ID_MAX_LEN];
+        if (obj->get_object_id_to(obj_id_buf) == entity_id) {
           found = true;
           if (value == "ON") {
             obj->turn_on();
@@ -375,8 +383,8 @@ void SerialRpcComponent::handle_set_entity_(JsonObject &request, JsonObject &res
 }
 
 void SerialRpcComponent::handle_button_press_(JsonObject &request, JsonObject &response) {
-  if (!request.containsKey("params") || !request["params"].is<JsonObject>() ||
-      !request["params"].as<JsonObject>().containsKey("id")) {
+  if (!request["params"].is<JsonObject>() ||
+      request["params"]["id"].isNull()) {
     response["error"]["code"] = -32602;
     response["error"]["message"] = "Invalid params";
     return;
@@ -385,7 +393,7 @@ void SerialRpcComponent::handle_button_press_(JsonObject &request, JsonObject &r
   JsonObject params = request["params"];
   std::string button_id = params["id"].as<std::string>();
   
-  JsonObject result = response.createNestedObject("result");
+  JsonObject result = response["result"].to<JsonObject>();
   result["id"] = button_id;
   
   bool found = false;
@@ -393,7 +401,8 @@ void SerialRpcComponent::handle_button_press_(JsonObject &request, JsonObject &r
   
 #ifdef USE_BUTTON
   for (auto *obj : App.get_buttons()) {
-    if (obj->get_object_id() == button_id) {
+    char obj_id_buf[OBJECT_ID_MAX_LEN];
+    if (obj->get_object_id_to(obj_id_buf) == button_id) {
       found = true;
       obj->press();
       success = true;
@@ -420,9 +429,9 @@ void SerialRpcComponent::handle_button_press_(JsonObject &request, JsonObject &r
 
 void SerialRpcComponent::handle_wifi_settings_(JsonObject &request, JsonObject &response) {
 #ifdef USE_WIFI
-  if (!request.containsKey("params") || !request["params"].is<JsonObject>() ||
-      !request["params"].as<JsonObject>().containsKey("ssid") || 
-      !request["params"].as<JsonObject>().containsKey("password")) {
+  if (!request["params"].is<JsonObject>() ||
+      request["params"]["ssid"].isNull() || 
+      request["params"]["password"].isNull()) {
     response["error"]["code"] = -32602;
     response["error"]["message"] = "Invalid params";
     return;
@@ -445,7 +454,7 @@ void SerialRpcComponent::handle_wifi_settings_(JsonObject &request, JsonObject &
   auto f = std::bind(&SerialRpcComponent::on_wifi_connect_timeout_, this);
   this->set_timeout("wifi-connect-timeout", 30000, f);
   
-  JsonObject result = response.createNestedObject("result");
+  JsonObject result = response["result"].to<JsonObject>();
   result["connecting"] = true;
   result["ssid"] = ssid;
 #else
@@ -456,8 +465,8 @@ void SerialRpcComponent::handle_wifi_settings_(JsonObject &request, JsonObject &
 
 void SerialRpcComponent::handle_get_wifi_networks_(JsonObject &request, JsonObject &response) {
 #ifdef USE_WIFI
-  JsonObject result = response.createNestedObject("result");
-  JsonArray networks = result.createNestedArray("networks");
+  JsonObject result = response["result"].to<JsonObject>();
+  JsonArray networks = result["networks"].to<JsonArray>();
   
   const auto &scan_results = wifi::global_wifi_component->get_scan_result();
   std::vector<std::string> added_ssids;
@@ -470,7 +479,7 @@ void SerialRpcComponent::handle_get_wifi_networks_(JsonObject &request, JsonObje
     if (std::find(added_ssids.begin(), added_ssids.end(), ssid) != added_ssids.end())
       continue;
     
-    JsonObject network = networks.createNestedObject();
+    JsonObject network = networks.add<JsonObject>();
     network["ssid"] = ssid;
     network["rssi"] = scan.get_rssi();
     network["channel"] = scan.get_channel();
